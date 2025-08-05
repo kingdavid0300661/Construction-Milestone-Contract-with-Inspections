@@ -352,3 +352,84 @@
         )
     )
 )
+
+(define-constant err-invalid-progress (err u112))
+(define-constant err-progress-exists (err u113))
+
+(define-data-var progress-counter uint u0)
+
+(define-map MilestoneProgress
+    uint
+    {
+        milestone-id: uint,
+        progress-percentage: uint,
+        description: (string-ascii 150),
+        evidence-link: (string-ascii 200),
+        updated-by: principal,
+        timestamp: uint,
+        previous-progress-id: uint,
+    }
+)
+
+(define-map MilestoneLatestProgress
+    uint
+    uint
+)
+
+(define-public (update-milestone-progress
+        (milestone-id uint)
+        (progress-percentage uint)
+        (description (string-ascii 150))
+        (evidence-link (string-ascii 200))
+    )
+    (let (
+            (milestone (unwrap! (map-get? Milestones milestone-id) err-invalid-milestone))
+            (progress-id (+ (var-get progress-counter) u1))
+            (current-latest (default-to u0 (map-get? MilestoneLatestProgress milestone-id)))
+        )
+        (asserts! (<= progress-percentage u100) err-invalid-progress)
+        (asserts! (not (get completed milestone)) err-already-approved)
+        (var-set progress-counter progress-id)
+        (map-set MilestoneProgress progress-id {
+            milestone-id: milestone-id,
+            progress-percentage: progress-percentage,
+            description: description,
+            evidence-link: evidence-link,
+            updated-by: tx-sender,
+            timestamp: burn-block-height,
+            previous-progress-id: current-latest,
+        })
+        (map-set MilestoneLatestProgress milestone-id progress-id)
+        (ok progress-id)
+    )
+)
+
+(define-read-only (get-milestone-progress (progress-id uint))
+    (map-get? MilestoneProgress progress-id)
+)
+
+(define-read-only (get-latest-progress (milestone-id uint))
+    (let ((latest-id (map-get? MilestoneLatestProgress milestone-id)))
+        (if (is-some latest-id)
+            (map-get? MilestoneProgress (unwrap-panic latest-id))
+            none
+        )
+    )
+)
+
+(define-read-only (get-milestone-progress-summary (milestone-id uint))
+    (let (
+            (milestone (map-get? Milestones milestone-id))
+            (latest-progress (get-latest-progress milestone-id))
+        )
+        (if (and (is-some milestone) (is-some latest-progress))
+            (some {
+                milestone-info: (unwrap-panic milestone),
+                current-progress: (get progress-percentage (unwrap-panic latest-progress)),
+                last-update: (get timestamp (unwrap-panic latest-progress)),
+                updated-by: (get updated-by (unwrap-panic latest-progress)),
+            })
+            none
+        )
+    )
+)
