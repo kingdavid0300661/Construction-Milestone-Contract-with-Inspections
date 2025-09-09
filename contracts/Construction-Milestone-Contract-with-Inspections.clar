@@ -433,3 +433,168 @@
         )
     )
 )
+
+(define-constant err-invalid-budget (err u114))
+(define-constant err-budget-exceeded (err u115))
+(define-constant err-no-budget-allocation (err u116))
+
+(define-map MilestoneBudget
+    uint
+    {
+        materials-budget: uint,
+        labor-budget: uint,
+        equipment-budget: uint,
+        total-allocated: uint,
+        created-at: uint,
+    }
+)
+
+(define-map MilestoneExpenses
+    uint
+    {
+        materials-actual: uint,
+        labor-actual: uint,
+        equipment-actual: uint,
+        total-spent: uint,
+        last-updated: uint,
+    }
+)
+
+(define-public (set-milestone-budget
+        (milestone-id uint)
+        (materials-budget uint)
+        (labor-budget uint)
+        (equipment-budget uint)
+    )
+    (let (
+            (milestone (unwrap! (map-get? Milestones milestone-id) err-invalid-milestone))
+            (total-budget (+ (+ materials-budget labor-budget) equipment-budget))
+        )
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (is-eq total-budget (get amount milestone)) err-invalid-budget)
+        (asserts! (> materials-budget u0) err-invalid-budget)
+        (asserts! (> labor-budget u0) err-invalid-budget)
+        (asserts! (> equipment-budget u0) err-invalid-budget)
+        (map-set MilestoneBudget milestone-id {
+            materials-budget: materials-budget,
+            labor-budget: labor-budget,
+            equipment-budget: equipment-budget,
+            total-allocated: total-budget,
+            created-at: burn-block-height,
+        })
+        (map-set MilestoneExpenses milestone-id {
+            materials-actual: u0,
+            labor-actual: u0,
+            equipment-actual: u0,
+            total-spent: u0,
+            last-updated: burn-block-height,
+        })
+        (ok true)
+    )
+)
+
+(define-public (record-expense
+        (milestone-id uint)
+        (expense-category (string-ascii 20))
+        (amount uint)
+    )
+    (let (
+            (milestone (unwrap! (map-get? Milestones milestone-id) err-invalid-milestone))
+            (budget (unwrap! (map-get? MilestoneBudget milestone-id)
+                err-no-budget-allocation
+            ))
+            (current-expenses (unwrap! (map-get? MilestoneExpenses milestone-id)
+                err-no-budget-allocation
+            ))
+        )
+        (asserts! (not (get completed milestone)) err-already-approved)
+        (asserts! (> amount u0) err-invalid-budget)
+        (if (is-eq expense-category "materials")
+            (let (
+                    (new-materials (+ (get materials-actual current-expenses) amount))
+                    (new-total (+ (get total-spent current-expenses) amount))
+                )
+                (asserts! (<= new-materials (get materials-budget budget))
+                    err-budget-exceeded
+                )
+                (map-set MilestoneExpenses milestone-id
+                    (merge current-expenses {
+                        materials-actual: new-materials,
+                        total-spent: new-total,
+                        last-updated: burn-block-height,
+                    })
+                )
+                (ok true)
+            )
+            (if (is-eq expense-category "labor")
+                (let (
+                        (new-labor (+ (get labor-actual current-expenses) amount))
+                        (new-total (+ (get total-spent current-expenses) amount))
+                    )
+                    (asserts! (<= new-labor (get labor-budget budget))
+                        err-budget-exceeded
+                    )
+                    (map-set MilestoneExpenses milestone-id
+                        (merge current-expenses {
+                            labor-actual: new-labor,
+                            total-spent: new-total,
+                            last-updated: burn-block-height,
+                        })
+                    )
+                    (ok true)
+                )
+                (if (is-eq expense-category "equipment")
+                    (let (
+                            (new-equipment (+ (get equipment-actual current-expenses) amount))
+                            (new-total (+ (get total-spent current-expenses) amount))
+                        )
+                        (asserts!
+                            (<= new-equipment (get equipment-budget budget))
+                            err-budget-exceeded
+                        )
+                        (map-set MilestoneExpenses milestone-id
+                            (merge current-expenses {
+                                equipment-actual: new-equipment,
+                                total-spent: new-total,
+                                last-updated: burn-block-height,
+                            })
+                        )
+                        (ok true)
+                    )
+                    err-invalid-budget
+                )
+            )
+        )
+    )
+)
+
+(define-read-only (get-milestone-budget (milestone-id uint))
+    (map-get? MilestoneBudget milestone-id)
+)
+
+(define-read-only (get-milestone-expenses (milestone-id uint))
+    (map-get? MilestoneExpenses milestone-id)
+)
+
+(define-read-only (get-budget-analysis (milestone-id uint))
+    (let (
+            (budget (map-get? MilestoneBudget milestone-id))
+            (expenses (map-get? MilestoneExpenses milestone-id))
+        )
+        (if (and (is-some budget) (is-some expenses))
+            (let (
+                    (b (unwrap-panic budget))
+                    (e (unwrap-panic expenses))
+                )
+                (some {
+                    materials-variance: (- (get materials-budget b) (get materials-actual e)),
+                    labor-variance: (- (get labor-budget b) (get labor-actual e)),
+                    equipment-variance: (- (get equipment-budget b) (get equipment-actual e)),
+                    total-variance: (- (get total-allocated b) (get total-spent e)),
+                    budget-utilization: (/ (* (get total-spent e) u100) (get total-allocated b)),
+                })
+            )
+            none
+        )
+    )
+)
