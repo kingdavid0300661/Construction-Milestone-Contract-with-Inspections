@@ -598,3 +598,216 @@
         )
     )
 )
+
+;; ===== CONTRACTOR QUALITY RATING SYSTEM =====
+;; Independent feature for tracking contractor performance ratings
+
+(define-constant err-invalid-rating (err u117))
+(define-constant err-already-rated (err u118))
+(define-constant err-contractor-not-found (err u119))
+(define-constant err-unauthorized-rater (err u120))
+(define-constant err-contractor-blacklisted (err u121))
+(define-constant err-invalid-threshold (err u122))
+
+(define-data-var rating-counter uint u0)
+(define-data-var blacklist-threshold uint u200) ;; 2.0 stars (out of 500 = 5.0 stars)
+
+(define-map ContractorRatings
+    uint
+    {
+        contractor: principal,
+        rater: principal,
+        rating: uint,
+        milestone-id: uint,
+        comment: (string-ascii 200),
+        timestamp: uint,
+    }
+)
+
+(define-map ContractorProfiles
+    principal
+    {
+        total-ratings: uint,
+        rating-sum: uint,
+        average-rating: uint,
+        is-blacklisted: bool,
+        last-rating-update: uint,
+    }
+)
+
+(define-map RatingHistory
+    {
+        contractor: principal,
+        rater: principal,
+        milestone-id: uint
+    }
+    bool
+)
+
+(define-public (rate-contractor
+        (contractor principal)
+        (rating uint)
+        (milestone-id uint)
+        (comment (string-ascii 200))
+    )
+    (let (
+            (milestone (unwrap! (map-get? Milestones milestone-id) err-invalid-milestone))
+            (rating-id (+ (var-get rating-counter) u1))
+            (rating-key {
+                contractor: contractor,
+                rater: tx-sender,
+                milestone-id: milestone-id
+            })
+            (current-profile (default-to {
+                total-ratings: u0,
+                rating-sum: u0,
+                average-rating: u0,
+                is-blacklisted: false,
+                last-rating-update: u0,
+            } (map-get? ContractorProfiles contractor)))
+        )
+        ;; Validate inputs
+        (asserts! (and (>= rating u1) (<= rating u5)) err-invalid-rating)
+        (asserts! (get approved milestone) err-not-approved)
+        (asserts! (is-none (map-get? RatingHistory rating-key)) err-already-rated)
+        
+        ;; Only allow contract owner, inspector, or milestone participants to rate
+        (asserts!
+            (or
+                (is-eq tx-sender contract-owner)
+                (is-eq tx-sender (get inspector milestone))
+                (is-inspector tx-sender)
+            )
+            err-unauthorized-rater
+        )
+        
+        ;; Record the rating
+        (var-set rating-counter rating-id)
+        (map-set ContractorRatings rating-id {
+            contractor: contractor,
+            rater: tx-sender,
+            rating: rating,
+            milestone-id: milestone-id,
+            comment: comment,
+            timestamp: burn-block-height,
+        })
+        
+        ;; Mark as rated to prevent duplicates
+        (map-set RatingHistory rating-key true)
+        
+        ;; Update contractor profile
+        (let (
+                (new-total (+ (get total-ratings current-profile) u1))
+                (new-sum (+ (get rating-sum current-profile) (* rating u100)))
+                (new-average (/ new-sum new-total))
+                (should-blacklist (< new-average (var-get blacklist-threshold)))
+            )
+            (map-set ContractorProfiles contractor {
+                total-ratings: new-total,
+                rating-sum: new-sum,
+                average-rating: new-average,
+                is-blacklisted: (and (>= new-total u3) should-blacklist),
+                last-rating-update: burn-block-height,
+            })
+        )
+        
+        (ok rating-id)
+    )
+)
+
+(define-public (update-rating-threshold (new-threshold uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (and (>= new-threshold u100) (<= new-threshold u500)) err-invalid-threshold)
+        (var-set blacklist-threshold new-threshold)
+        (ok true)
+    )
+)
+
+(define-public (manually-blacklist-contractor (contractor principal) (blacklist bool))
+    (let (
+            (current-profile (default-to {
+                total-ratings: u0,
+                rating-sum: u0,
+                average-rating: u0,
+                is-blacklisted: false,
+                last-rating-update: u0,
+            } (map-get? ContractorProfiles contractor)))
+        )
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (map-set ContractorProfiles contractor
+            (merge current-profile { is-blacklisted: blacklist })
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-contractor-profile (contractor principal))
+    (map-get? ContractorProfiles contractor)
+)
+
+(define-read-only (get-contractor-rating (rating-id uint))
+    (map-get? ContractorRatings rating-id)
+)
+
+(define-read-only (has-rated-milestone (contractor principal) (rater principal) (milestone-id uint))
+    (is-some (map-get? RatingHistory {
+        contractor: contractor,
+        rater: rater,
+        milestone-id: milestone-id
+    }))
+)
+
+(define-read-only (is-contractor-blacklisted (contractor principal))
+    (let (
+            (profile (map-get? ContractorProfiles contractor))
+        )
+        (if (is-some profile)
+            (get is-blacklisted (unwrap-panic profile))
+            false
+        )
+    )
+)
+
+(define-read-only (get-contractor-rating-summary (contractor principal))
+    (let (
+            (profile (map-get? ContractorProfiles contractor))
+        )
+        (if (is-some profile)
+            (let (
+                    (p (unwrap-panic profile))
+                    (avg-stars (/ (get average-rating p) u100))
+                    (avg-decimal (mod (get average-rating p) u100))
+                )
+                (some {
+                    contractor: contractor,
+                    total-ratings: (get total-ratings p),
+                    average-rating-raw: (get average-rating p),
+                    average-stars: avg-stars,
+                    average-decimal: avg-decimal,
+                    is-blacklisted: (get is-blacklisted p),
+                    last-update: (get last-rating-update p),
+                    rating-status: (if (get is-blacklisted p)
+                        "blacklisted"
+                        (if (< (get average-rating p) u250)
+                            "poor"
+                            (if (>= (get average-rating p) u400)
+                                "excellent"
+                                "good"
+                            )
+                        )
+                    ),
+                })
+            )
+            none
+        )
+    )
+)
+
+(define-read-only (get-rating-system-stats)
+    {
+        total-ratings-submitted: (var-get rating-counter),
+        current-blacklist-threshold: (var-get blacklist-threshold),
+        threshold-in-stars: (/ (var-get blacklist-threshold) u100),
+    }
+)
