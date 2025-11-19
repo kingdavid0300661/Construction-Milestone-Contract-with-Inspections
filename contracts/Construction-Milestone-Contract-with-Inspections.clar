@@ -639,7 +639,7 @@
     {
         contractor: principal,
         rater: principal,
-        milestone-id: uint
+        milestone-id: uint,
     }
     bool
 )
@@ -656,7 +656,7 @@
             (rating-key {
                 contractor: contractor,
                 rater: tx-sender,
-                milestone-id: milestone-id
+                milestone-id: milestone-id,
             })
             (current-profile (default-to {
                 total-ratings: u0,
@@ -664,13 +664,15 @@
                 average-rating: u0,
                 is-blacklisted: false,
                 last-rating-update: u0,
-            } (map-get? ContractorProfiles contractor)))
+            }
+                (map-get? ContractorProfiles contractor)
+            ))
         )
         ;; Validate inputs
         (asserts! (and (>= rating u1) (<= rating u5)) err-invalid-rating)
         (asserts! (get approved milestone) err-not-approved)
         (asserts! (is-none (map-get? RatingHistory rating-key)) err-already-rated)
-        
+
         ;; Only allow contract owner, inspector, or milestone participants to rate
         (asserts!
             (or
@@ -680,7 +682,7 @@
             )
             err-unauthorized-rater
         )
-        
+
         ;; Record the rating
         (var-set rating-counter rating-id)
         (map-set ContractorRatings rating-id {
@@ -691,10 +693,10 @@
             comment: comment,
             timestamp: burn-block-height,
         })
-        
+
         ;; Mark as rated to prevent duplicates
         (map-set RatingHistory rating-key true)
-        
+
         ;; Update contractor profile
         (let (
                 (new-total (+ (get total-ratings current-profile) u1))
@@ -710,7 +712,7 @@
                 last-rating-update: burn-block-height,
             })
         )
-        
+
         (ok rating-id)
     )
 )
@@ -718,22 +720,27 @@
 (define-public (update-rating-threshold (new-threshold uint))
     (begin
         (asserts! (is-eq tx-sender contract-owner) err-owner-only)
-        (asserts! (and (>= new-threshold u100) (<= new-threshold u500)) err-invalid-threshold)
+        (asserts! (and (>= new-threshold u100) (<= new-threshold u500))
+            err-invalid-threshold
+        )
         (var-set blacklist-threshold new-threshold)
         (ok true)
     )
 )
 
-(define-public (manually-blacklist-contractor (contractor principal) (blacklist bool))
-    (let (
-            (current-profile (default-to {
-                total-ratings: u0,
-                rating-sum: u0,
-                average-rating: u0,
-                is-blacklisted: false,
-                last-rating-update: u0,
-            } (map-get? ContractorProfiles contractor)))
-        )
+(define-public (manually-blacklist-contractor
+        (contractor principal)
+        (blacklist bool)
+    )
+    (let ((current-profile (default-to {
+            total-ratings: u0,
+            rating-sum: u0,
+            average-rating: u0,
+            is-blacklisted: false,
+            last-rating-update: u0,
+        }
+            (map-get? ContractorProfiles contractor)
+        )))
         (asserts! (is-eq tx-sender contract-owner) err-owner-only)
         (map-set ContractorProfiles contractor
             (merge current-profile { is-blacklisted: blacklist })
@@ -750,18 +757,20 @@
     (map-get? ContractorRatings rating-id)
 )
 
-(define-read-only (has-rated-milestone (contractor principal) (rater principal) (milestone-id uint))
+(define-read-only (has-rated-milestone
+        (contractor principal)
+        (rater principal)
+        (milestone-id uint)
+    )
     (is-some (map-get? RatingHistory {
         contractor: contractor,
         rater: rater,
-        milestone-id: milestone-id
+        milestone-id: milestone-id,
     }))
 )
 
 (define-read-only (is-contractor-blacklisted (contractor principal))
-    (let (
-            (profile (map-get? ContractorProfiles contractor))
-        )
+    (let ((profile (map-get? ContractorProfiles contractor)))
         (if (is-some profile)
             (get is-blacklisted (unwrap-panic profile))
             false
@@ -770,9 +779,7 @@
 )
 
 (define-read-only (get-contractor-rating-summary (contractor principal))
-    (let (
-            (profile (map-get? ContractorProfiles contractor))
-        )
+    (let ((profile (map-get? ContractorProfiles contractor)))
         (if (is-some profile)
             (let (
                     (p (unwrap-panic profile))
@@ -810,4 +817,49 @@
         current-blacklist-threshold: (var-get blacklist-threshold),
         threshold-in-stars: (/ (var-get blacklist-threshold) u100),
     }
+)
+
+(define-map MilestoneEvidence
+    {
+        milestone-id: uint,
+        submitted-by: principal,
+    }
+    {
+        uri: (string-utf8 200),
+        note: (string-utf8 100),
+        submitted-at: uint,
+    }
+)
+
+(define-public (submit-milestone-evidence
+        (milestone-id uint)
+        (uri (string-utf8 200))
+        (note (string-utf8 100))
+    )
+    (let (
+            (milestone (unwrap! (map-get? Milestones milestone-id) err-invalid-milestone))
+            (sender tx-sender)
+            (timestamp burn-block-height)
+        )
+        (asserts! (not (get completed milestone)) err-already-approved)
+        (map-set MilestoneEvidence {
+            milestone-id: milestone-id,
+            submitted-by: sender,
+        } {
+            uri: uri,
+            note: note,
+            submitted-at: timestamp,
+        })
+        (ok true)
+    )
+)
+
+(define-read-only (get-milestone-evidence
+        (milestone-id uint)
+        (submitted-by principal)
+    )
+    (map-get? MilestoneEvidence {
+        milestone-id: milestone-id,
+        submitted-by: submitted-by,
+    })
 )
